@@ -9,24 +9,12 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-from setuptools import setup
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+from setuptools import setup, find_packages
 import os
-
-cxx_compiler_flags = []
-
-if os.name == 'nt':
-    cxx_compiler_flags.append("/wd4624")
 
 setup(
     name="simple_knn",
-    ext_modules=[
-        CUDAExtension(
-            name="simple_knn._C",
-            sources=["simple_knn.cu"],
-            extra_compile_args={"nvcc": [], "cxx": cxx_compiler_flags})
-        ],
-    cmdclass={
-        'build_ext': BuildExtension
-    }
+    packages=find_packages(),
+    package_data={'simple_knn': ['csrc/*']},
+    include_package_data=True
 )

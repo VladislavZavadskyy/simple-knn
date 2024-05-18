@@ -11,7 +11,10 @@
 
 #define BOX_SIZE 1024
 
-#include <torch/extension.h>
+#ifndef __CUDACC__
+	#define __CUDACC__
+#endif
+
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <cub/cub.cuh>
@@ -21,13 +24,11 @@
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
 
-#ifndef __CUDACC__
-	#define __CUDACC__
-#endif
-
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include <thrust/fill.h>
+
+#include <torch/extension.h>
 
 namespace cg = cooperative_groups;
 
@@ -251,17 +252,17 @@ void knn(int P, float3* points, float* dists, long* min_indices)
 	cudaFree(result);
 }
 
-std::vector<torch::Tensor> distCUDA2(const torch::Tensor& points, int K)
+std::vector<torch::Tensor> distCUDA2(const torch::Tensor& points)
 {
   const int P = points.size(0);
 
   auto float_opts = points.options().dtype(torch::kFloat32);
   auto long_opts = points.options().dtype(torch::kInt64);
 
-  torch::Tensor dists = torch::full({P, K}, FLT_MAX, float_opts);
-  torch::Tensor min_indices = torch::full({P, K}, (long)(-1), long_opts);
+  torch::Tensor dists = torch::full({P, {{num_nearest}}}, FLT_MAX, float_opts);
+  torch::Tensor min_indices = torch::full({P, {{num_nearest}}}, (long)(-1), long_opts);
   
-  knn<3>(
+  knn<{{num_nearest}}>(
 	P, (float3*)points.contiguous().data_ptr<float>(), 
 	dists.data_ptr<float>(),
 	min_indices.data_ptr<long>()
