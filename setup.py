@@ -23,10 +23,7 @@ setup(
     ext_modules=[
         CUDAExtension(
             name="simple_knn._C",
-            sources=[
-            "spatial.cu", 
-            "simple_knn.cu",
-            "ext.cpp"],
+            sources=["simple_knn.cu"],
             extra_compile_args={"nvcc": [], "cxx": cxx_compiler_flags})
         ],
     cmdclass={

@@ -11,18 +11,23 @@
 
 #define BOX_SIZE 1024
 
+#include <torch/extension.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include "simple_knn.h"
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <vector>
 #include <cuda_runtime_api.h>
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
-#define __CUDACC__
+
+#ifndef __CUDACC__
+	#define __CUDACC__
+#endif
+
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <thrust/fill.h>
 
 namespace cg = cooperative_groups;
 
@@ -128,8 +133,7 @@ __device__ __host__ float distBoxPoint(const MinMax& box, const float3& p)
 	return diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 }
 
-template<int K>
-__device__ void updateKBest(const float3& ref, const float3& point, float* knn)
+__device__ void updateKBest(const float3& ref, const float3& point, float* knn, uint32_t K)
 {
 	float3 d = { point.x - ref.x, point.y - ref.y, point.z - ref.z };
 	float dist = d.x * d.x + d.y * d.y + d.z * d.z;
@@ -144,26 +148,25 @@ __device__ void updateKBest(const float3& ref, const float3& point, float* knn)
 	}
 }
 
-__global__ void boxMeanDist(uint32_t P, float3* points, uint32_t* indices, MinMax* boxes, float* dists)
+__global__ void boxMeanDist(uint32_t P, uint32_t K, float3* points, uint32_t* indices, MinMax* boxes, float* dists)
 {
 	int idx = cg::this_grid().thread_rank();
 	if (idx >= P)
 		return;
 
 	float3 point = points[indices[idx]];
-	float best[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+	float* best = (float*)malloc(K * sizeof(float));
+	thrust::fill(best, best+K, FLT_MAX);
 
 	for (int i = max(0, idx - 3); i <= min(P - 1, idx + 3); i++)
 	{
 		if (i == idx)
 			continue;
-		updateKBest<3>(point, points[indices[i]], best);
+		updateKBest(point, points[indices[i]], best, K);
 	}
 
-	float reject = best[2];
-	best[0] = FLT_MAX;
-	best[1] = FLT_MAX;
-	best[2] = FLT_MAX;
+	float reject = best[K-1];
+	thrust::fill(best, best+K, FLT_MAX);
 
 	for (int b = 0; b < (P + BOX_SIZE - 1) / BOX_SIZE; b++)
 	{
@@ -176,13 +179,20 @@ __global__ void boxMeanDist(uint32_t P, float3* points, uint32_t* indices, MinMa
 		{
 			if (i == idx)
 				continue;
-			updateKBest<3>(point, points[indices[i]], best);
+			updateKBest(point, points[indices[i]], best, K);
 		}
 	}
-	dists[indices[idx]] = (best[0] + best[1] + best[2]) / 3.0f;
+	float mean = 0.0f;
+	for (int i = 0; i < K; ++i) mean += best[i];
+	mean /= (float) K;
+
+	dists[indices[idx]] = mean;
+
+	free(best);
 }
 
-void SimpleKNN::knn(int P, float3* points, float* meanDists)
+
+void knn(int P, int K, float3* points, float* meanDists)
 {
 	float3* result;
 	cudaMalloc(&result, sizeof(float3));
@@ -201,7 +211,7 @@ void SimpleKNN::knn(int P, float3* points, float* meanDists)
 
 	thrust::device_vector<uint32_t> morton(P);
 	thrust::device_vector<uint32_t> morton_sorted(P);
-	coord2Morton << <(P + 255) / 256, 256 >> > (P, points, minn, maxx, morton.data().get());
+	coord2Morton<<<(P + 255) / 256, 256>>>(P, points, minn, maxx, morton.data().get());
 
 	thrust::device_vector<uint32_t> indices(P);
 	thrust::sequence(indices.begin(), indices.end());
@@ -214,8 +224,24 @@ void SimpleKNN::knn(int P, float3* points, float* meanDists)
 
 	uint32_t num_boxes = (P + BOX_SIZE - 1) / BOX_SIZE;
 	thrust::device_vector<MinMax> boxes(num_boxes);
-	boxMinMax << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get());
-	boxMeanDist << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
+	boxMinMax<<<num_boxes, BOX_SIZE>>>(P, points, indices_sorted.data().get(), boxes.data().get());
+	boxMeanDist<<<num_boxes, BOX_SIZE>>>(P, K, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
 
 	cudaFree(result);
+}
+
+torch::Tensor distCUDA2(const torch::Tensor& points, int K)
+{
+  const int P = points.size(0);
+
+  auto float_opts = points.options().dtype(torch::kFloat32);
+  torch::Tensor means = torch::full({P}, 0.0, float_opts);
+  
+  knn(P, K, (float3*)points.contiguous().data_ptr<float>(), means.contiguous().data_ptr<float>());
+
+  return means;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("distCUDA2", &distCUDA2);
 }
