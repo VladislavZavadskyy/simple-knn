@@ -1,2 +1,5 @@
 build
 *.egg-info
+simple_knn
+.vscode
+test.py

@@ -133,66 +133,85 @@ __device__ __host__ float distBoxPoint(const MinMax& box, const float3& p)
 	return diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 }
 
-__device__ void updateKBest(const float3& ref, const float3& point, float* knn, uint32_t K)
-{
+template<int K>
+__device__ __forceinline__ void updateKBest(
+	const float3& ref, 
+	const float3& point, 
+	uint32_t ptidx,
+	float* knn, 
+	uint32_t* bestidx
+){
 	float3 d = { point.x - ref.x, point.y - ref.y, point.z - ref.z };
 	float dist = d.x * d.x + d.y * d.y + d.z * d.z;
+
 	for (int j = 0; j < K; j++)
-	{
-		if (knn[j] > dist)
-		{
+		if (knn[j] > dist){
 			float t = knn[j];
+			long i = bestidx[j];
+
 			knn[j] = dist;
+			bestidx[j] = ptidx;
+
 			dist = t;
+			ptidx = i;
 		}
-	}
 }
 
-__global__ void boxMeanDist(uint32_t P, uint32_t K, float3* points, uint32_t* indices, MinMax* boxes, float* dists)
-{
+template<int K>
+__global__ void boxMeanDist(
+	uint32_t P,
+	float3* points, 
+	uint32_t* indices, 
+	MinMax* boxes, 
+	float* dists,
+	long* min_indices
+){
 	int idx = cg::this_grid().thread_rank();
-	if (idx >= P)
-		return;
+	if (idx >= P) return;
 
-	float3 point = points[indices[idx]];
-	float* best = (float*)malloc(K * sizeof(float));
-	thrust::fill(best, best+K, FLT_MAX);
+	uint32_t ptidx = indices[idx];
+	float3 point = points[ptidx];
 
-	for (int i = max(0, idx - 3); i <= min(P - 1, idx + 3); i++)
+	float best[K] = { FLT_MAX };
+	uint32_t best_idx[K] = { (uint32_t)(-1) };
+
+	for (int i = max(0, idx-3); i <= min(P-1, idx+3); i++)
 	{
-		if (i == idx)
-			continue;
-		updateKBest(point, points[indices[i]], best, K);
+		if (i == idx) continue;
+		uint32_t curr_idx = indices[i];
+		updateKBest<K>(point, points[curr_idx], curr_idx, best, best_idx);
 	}
 
 	float reject = best[K-1];
-	thrust::fill(best, best+K, FLT_MAX);
+	for (int i = 0; i < K; i++) {
+		best[i] = FLT_MAX; best_idx[i] = (uint32_t)(-1);
+	}
 
-	for (int b = 0; b < (P + BOX_SIZE - 1) / BOX_SIZE; b++)
+	for (int b = 0; b < (P+BOX_SIZE-1)/BOX_SIZE; b++)
 	{
 		MinMax box = boxes[b];
 		float dist = distBoxPoint(box, point);
-		if (dist > reject || dist > best[2])
-			continue;
+		if (dist > reject || dist > best[K-1]) continue;
 
-		for (int i = b * BOX_SIZE; i < min(P, (b + 1) * BOX_SIZE); i++)
+		for (int i = b*BOX_SIZE; i < min(P, (b+1)*BOX_SIZE); i++)
 		{
-			if (i == idx)
-				continue;
-			updateKBest(point, points[indices[i]], best, K);
+			if (i == idx) continue;
+			uint32_t curr_idx = indices[i];
+			updateKBest<K>(point, points[curr_idx], curr_idx, best, best_idx);
 		}
 	}
-	float mean = 0.0f;
-	for (int i = 0; i < K; ++i) mean += best[i];
-	mean /= (float) K;
 
-	dists[indices[idx]] = mean;
+	float* dists_start = dists + ptidx * K;
+	long* idx_start = min_indices + ptidx * K;
 
-	free(best);
+	for (int i = 0; i < K; i++) {
+		dists_start[i] = best[i];
+		idx_start[i] = (long)best_idx[i];
+	}
 }
 
-
-void knn(int P, int K, float3* points, float* meanDists)
+template<int K>
+void knn(int P, float3* points, float* dists, long* min_indices)
 {
 	float3* result;
 	cudaMalloc(&result, sizeof(float3));
@@ -225,21 +244,30 @@ void knn(int P, int K, float3* points, float* meanDists)
 	uint32_t num_boxes = (P + BOX_SIZE - 1) / BOX_SIZE;
 	thrust::device_vector<MinMax> boxes(num_boxes);
 	boxMinMax<<<num_boxes, BOX_SIZE>>>(P, points, indices_sorted.data().get(), boxes.data().get());
-	boxMeanDist<<<num_boxes, BOX_SIZE>>>(P, K, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
+	boxMeanDist<K><<<num_boxes, BOX_SIZE>>>(
+		P, points, indices_sorted.data().get(), boxes.data().get(), dists, min_indices
+	);
 
 	cudaFree(result);
 }
 
-torch::Tensor distCUDA2(const torch::Tensor& points, int K)
+std::vector<torch::Tensor> distCUDA2(const torch::Tensor& points, int K)
 {
   const int P = points.size(0);
 
   auto float_opts = points.options().dtype(torch::kFloat32);
-  torch::Tensor means = torch::full({P}, 0.0, float_opts);
-  
-  knn(P, K, (float3*)points.contiguous().data_ptr<float>(), means.contiguous().data_ptr<float>());
+  auto long_opts = points.options().dtype(torch::kInt64);
 
-  return means;
+  torch::Tensor dists = torch::full({P, K}, FLT_MAX, float_opts);
+  torch::Tensor min_indices = torch::full({P, K}, (long)(-1), long_opts);
+  
+  knn<3>(
+	P, (float3*)points.contiguous().data_ptr<float>(), 
+	dists.data_ptr<float>(),
+	min_indices.data_ptr<long>()
+  );
+
+  return {dists, min_indices};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
