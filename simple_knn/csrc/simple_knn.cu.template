@@ -30,6 +30,10 @@
 
 #include <torch/extension.h>
 
+#define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+
 namespace cg = cooperative_groups;
 
 struct CustomMin
@@ -254,6 +258,7 @@ void knn(int P, float3* points, float* dists, long* min_indices)
 
 std::vector<torch::Tensor> distCUDA2(const torch::Tensor& points)
 {
+  CHECK_INPUT(points);
   const int P = points.size(0);
 
   auto float_opts = points.options().dtype(torch::kFloat32);
@@ -263,7 +268,7 @@ std::vector<torch::Tensor> distCUDA2(const torch::Tensor& points)
   torch::Tensor min_indices = torch::full({P, {{num_nearest}}}, (long)(-1), long_opts);
   
   knn<{{num_nearest}}>(
-	P, (float3*)points.contiguous().data_ptr<float>(), 
+	P, (float3*)points.data_ptr<float>(), 
 	dists.data_ptr<float>(),
 	min_indices.data_ptr<long>()
   );
