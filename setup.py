@@ -13,7 +13,7 @@ from setuptools import setup, find_packages
 import os
 
 setup(
-    name="simple_knn",
+    name="simple_knn_t",
     packages=find_packages(),
     package_data={'simple_knn': ['csrc/*']},
     include_package_data=True
