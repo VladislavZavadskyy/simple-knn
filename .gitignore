@@ -3,4 +3,4 @@
 *.egg-info
 .vscode
 test.py
-simple_knn/csrc/knn_*.cu
+simple_knn_t/csrc/knn_*.cu

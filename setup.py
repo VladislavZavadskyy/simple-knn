@@ -15,6 +15,6 @@ import os
 setup(
     name="simple_knn_t",
     packages=find_packages(),
-    package_data={'simple_knn': ['csrc/*']},
+    package_data={'simple_knn_t': ['csrc/*']},
     include_package_data=True
 )

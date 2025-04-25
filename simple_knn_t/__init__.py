@@ -1,5 +1,5 @@
 import os
-import torch
+
 from torch.utils.cpp_extension import load
 
 __all__ = ["knn"]
@@ -17,7 +17,7 @@ def _load_or_compile(num_neighbors, rebuild=False, verbose=False):
     src_path = os.path.join(EXTENSION_DIR, "csrc")
     extension_path = os.path.join(src_path, f"{extension_name}.cu")
 
-    with open(os.path.join(src_path, "simple_knn.cu.template")) as f:
+    with open(os.path.join(src_path, "simple_knn_t.cu.template")) as f:
         extension_code = f.read()
     extension_code = extension_code.replace("{{num_nearest}}", str(num_neighbors))
     
